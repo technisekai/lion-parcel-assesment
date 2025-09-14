@@ -1,0 +1,11 @@
+dagster==1.11.9
+dagster-graphql==1.11.9
+dagster-webserver==1.11.9
+dagster-postgres==0.27.9
+dagster-docker==0.27.9
+PyMySQL==1.1.1
+pandas==1.5.1
+numpy==1.26.4
+clickhouse-connect==0.8.18
+clickhouse-driver==0.2.9
+cryptography==45.0.6

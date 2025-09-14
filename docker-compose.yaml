@@ -1,0 +1,153 @@
+version: '3.7'
+
+services:
+  db-pg-dagster:
+    image: postgres:15
+    container_name: $DB_DAGSTER_CONTAINER_NAME
+    environment:
+      POSTGRES_USER: $DB_DAGSTER_USERNAME
+      POSTGRES_PASSWORD: $DB_DAGSTER_PASSWORD
+      POSTGRES_DB: 'postgres_db'
+    networks:
+      - lion-parcel-network
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U dagster -d postgres_db']
+      interval: 10s
+      timeout: 8s
+      retries: 5
+
+  # This service runs the gRPC server that loads your user code, in both dagster-webserver
+  # and dagster-daemon. By setting DAGSTER_CURRENT_IMAGE to its own image, we tell the
+  # run launcher to use this same image when launching runs in a new container as well.
+  # Multiple containers like this can be deployed separately - each just needs to run on
+  # its own port, and have its own entry in the workspace.yaml file that's loaded by the
+  # webserver.
+  dagster-dwh-user-code:
+    build:
+      context: .
+      dockerfile: ./Dockerfile_user_code
+    container_name: dagster-dwh-user-code
+    image: dagster-dwh-user-code:v1.0.0
+    restart: always
+    environment:
+      DAGSTER_POSTGRES_USER: $DB_DAGSTER_USERNAME
+      DAGSTER_POSTGRES_PASSWORD: $DB_DAGSTER_PASSWORD
+      DAGSTER_POSTGRES_DB: 'postgres_db'
+      DAGSTER_POSTGRES_HOSTNAME: $DB_DAGSTER_CONTAINER_NAME
+      DAGSTER_CURRENT_IMAGE: 'dagster-dwh-user-code:v1.0.0'
+    networks:
+      - lion-parcel-network
+
+  # This service runs dagster-webserver, which loads your user code from the user code container.
+  # Since our instance uses the QueuedRunCoordinator, any runs submitted from the webserver will be put on
+  # a queue and later dequeued and launched by dagster-daemon.
+  dagster-webserver:
+    build:
+      context: .
+      dockerfile: ./Dockerfile_dagster
+    entrypoint:
+      - dagster-webserver
+      - -h
+      - '0.0.0.0'
+      - -p
+      - '3000'
+      - -w
+      - workspace.yaml
+    container_name: dagster-webserver
+    image: dagster-webserver:v1.0.0
+    expose:
+      - '3000'
+    ports:
+      - '3000:3000'
+    environment:
+      DAGSTER_POSTGRES_USER: $DB_DAGSTER_USERNAME
+      DAGSTER_POSTGRES_PASSWORD: $DB_DAGSTER_PASSWORD
+      DAGSTER_POSTGRES_DB: 'postgres_db'
+      DAGSTER_POSTGRES_HOSTNAME: db-pg-dagster
+    volumes: # Make docker client accessible so we can terminate containers from the webserver
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /tmp/io_manager_storage:/tmp/io_manager_storage
+    networks:
+      - lion-parcel-network
+    depends_on:
+      db-pg-dagster:
+        condition: service_healthy
+      dagster-dwh-user-code:
+        condition: service_started
+  # This service runs the dagster-daemon process, which is responsible for taking runs
+  # off of the queue and launching them, as well as creating runs from schedules or sensors.
+  dagster-daemon:
+    build:
+      context: .
+      dockerfile: ./Dockerfile_dagster
+    entrypoint:
+      - dagster-daemon
+      - run
+    container_name: dagster-daemon
+    image: dagster-daemon:v1.0.0
+    restart: on-failure
+    environment:
+      DAGSTER_POSTGRES_USER: $DB_DAGSTER_USERNAME
+      DAGSTER_POSTGRES_PASSWORD: $DB_DAGSTER_PASSWORD
+      DAGSTER_POSTGRES_DB: 'postgres_db'
+      DAGSTER_POSTGRES_HOSTNAME: db-pg-dagster
+    volumes: # Make docker client accessible so we can launch containers using host docker
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /tmp/io_manager_storage:/tmp/io_manager_storage
+    networks:
+      - lion-parcel-network
+    depends_on:
+      db-pg-dagster:
+        condition: service_healthy
+      dagster-dwh-user-code:
+        condition: service_started
+  db-mysql:
+    image: mysql:8.0.43
+    container_name: db-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: admin
+      MYSQL_DATABASE: $MYSQL_DATABASE
+      MYSQL_USER: $MYSQL_USERNAME
+      MYSQL_PASSWORD: $MYSQL_PASSWORD
+    restart: always
+    volumes:
+      - ./assesment/queries/src/init_src.sql:/docker-entrypoint-initdb.d/init_src.sql
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "user", "-p$$MYSQL_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - lion-parcel-network 
+  dwh-clickhouse:
+    image: clickhouse:25.5.9
+    container_name: dwh-clickhouse
+    environment:
+      CLICKHOUSE_USER: $CLICKHOUSE_USERNAME
+      CLICKHOUSE_PASSWORD: $CLICKHOUSE_PASSWORD
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1  # Enables RBAC & user management
+    ports:
+      - "8123:8123"
+    restart: always
+    volumes:
+      - ./assesment/queries/init_dst.sql:/docker-entrypoint-initdb.d/init-clickhouse-db.sql
+      - dwh-clickhouse-vol:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - lion-parcel-network 
+
+volumes:
+  dwh-clickhouse-vol:
+
+networks:
+  lion-parcel-network:
+    driver: bridge
+    name: lion-parcel-network
